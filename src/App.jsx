@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
@@ -66,8 +66,11 @@ const App = () => {
   const [user, setUser] = useState(null);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [currentAltitude] = useState(1245); 
-  const [maxAltitude, setMaxAltitude] = useState(2150);
+  
+  // GPS 고도 관련 상태 (가짜 숫자 대신 0으로 시작)
+  const [currentAltitude, setCurrentAltitude] = useState(0); 
+  const [maxAltitude, setMaxAltitude] = useState(0);
+  const maxAltitudeRef = useRef(0); // 실시간 비교를 위한 참조값
   
   // 실시간 환율 (구글 매매기준율 기준)
   const [rates, setRates] = useState({ MYR: 1, THB: 7.82, LAK: 4500 });
@@ -113,6 +116,15 @@ const App = () => {
 
   // --- 2. 인증 및 초기화 ---
   useEffect(() => {
+    // iOS 사파리 입력창 포커스 시 자동 확대 방지 설정
+    let meta = document.querySelector('meta[name="viewport"]');
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.name = 'viewport';
+      document.head.appendChild(meta);
+    }
+    meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0';
+
     const initAuth = async () => {
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
@@ -141,6 +153,12 @@ const App = () => {
         setStartOdo(data.startOdo || 0);
         setCurrentOdo(data.currentOdo || 0);
         setSessionStart(data.sessionStart || 0);
+        
+        // 클라우드에 저장된 최고 고도 동기화
+        if (data.maxAltitude !== undefined) {
+          setMaxAltitude(data.maxAltitude);
+          maxAltitudeRef.current = data.maxAltitude;
+        }
       }
       setLoading(false);
     }, (err) => console.error("Config fetch error:", err));
@@ -159,6 +177,47 @@ const App = () => {
       unsubscribeConfig();
       unsubscribeLogs();
     };
+  }, [user]);
+
+  // --- 4. GPS 실시간 고도 추적 ---
+  useEffect(() => {
+    // 브라우저가 GPS를 지원하지 않으면 종료
+    if (!navigator.geolocation) return;
+
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        const alt = position.coords.altitude;
+        // GPS가 고도값을 제공할 경우에만 작동
+        if (alt !== null) {
+          const currentAltValue = Math.round(alt);
+          setCurrentAltitude(currentAltValue); // 현재 고도 업데이트
+          
+          // 현재 고도가 예전 최고 고도보다 높다면? 신기록 달성!
+          if (currentAltValue > maxAltitudeRef.current) {
+            setMaxAltitude(currentAltValue);
+            maxAltitudeRef.current = currentAltValue;
+            
+            // 파이어베이스에 새로운 최고 고도 저장
+            if (user) {
+              const configDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'config', 'state');
+              setDoc(configDocRef, { maxAltitude: currentAltValue }, { merge: true })
+                .catch(e => console.error("고도 저장 에러", e));
+            }
+          }
+        }
+      },
+      (error) => {
+        console.warn(`GPS 상태 알림 [코드 ${error.code}]: ${error.message}`);
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 10000,
+        timeout: 15000
+      }
+    );
+
+    // 컴포넌트 종료 시 GPS 추적 중지
+    return () => navigator.geolocation.clearWatch(watchId);
   }, [user]);
 
   useEffect(() => {
@@ -233,6 +292,12 @@ const App = () => {
       await deleteDoc(logDocRef);
     }
     await saveConfigToCloud(0, 0, 0);
+    // 초기화 시 최고 고도도 삭제
+    const configDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'config', 'state');
+    await updateDoc(configDocRef, { maxAltitude: 0 }).catch(() => {});
+    setMaxAltitude(0);
+    maxAltitudeRef.current = 0;
+    
     setConfirmState({ show: false, message: '', onConfirm: null });
     setActiveTab('dashboard');
   };
@@ -369,7 +434,7 @@ const App = () => {
         </div>
         <div className="flex items-center gap-2">
           <div className="relative flex-[1.2]">
-            <input type="number" value={calcAmount} onFocus={handleInputFocus} onChange={(e) => setCalcAmount(e.target.value)} className={`${theme.inner} w-full border ${isDarkMode ? 'border-slate-700' : 'border-slate-200'} rounded-lg p-2.5 pr-10 ${theme.textMain} font-mono text-sm outline-none placeholder:text-[10px]`} placeholder="0" />
+            <input type="number" value={calcAmount} onFocus={handleInputFocus} onChange={(e) => setCalcAmount(e.target.value)} className={`${theme.inner} w-full border ${isDarkMode ? 'border-slate-700' : 'border-slate-200'} rounded-lg p-2.5 pr-10 ${theme.textMain} font-mono text-[16px] outline-none placeholder:text-[10px]`} placeholder="0" />
             <div className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-[10px]">{calcCurrency}</div>
           </div>
           <div className="text-slate-300 font-black text-lg">=</div>
@@ -538,7 +603,7 @@ const App = () => {
                   <button onClick={() => setEntryType('expense')} className={`flex-1 py-2.5 rounded-lg font-bold transition-all ${entryType === 'expense' ? 'bg-emerald-600 text-white shadow-md' : 'text-slate-400'}`}>지출</button>
                 </div>
                 <div className="space-y-3">
-                  <input type="text" value={inputTitle} onChange={(e) => setInputTitle(e.target.value)} className={`${theme.input} w-full rounded-xl p-3.5 ${theme.textMain} outline-none text-sm focus:ring-1 focus:ring-blue-500/20`} placeholder="내용 입력" />
+                  <input type="text" value={inputTitle} onChange={(e) => setInputTitle(e.target.value)} className={`${theme.input} w-full rounded-xl p-3.5 ${theme.textMain} outline-none text-[16px] focus:ring-1 focus:ring-blue-500/20`} placeholder="내용 입력" />
                   <div className={`${theme.inner} p-3 rounded-xl border ${isDarkMode ? 'border-slate-700' : 'border-slate-100'}`}>
                     <label className="block text-[9px] font-bold text-slate-400 uppercase mb-2 text-center tracking-widest">통화 선택</label>
                     <div className="flex gap-2 mb-3">
@@ -553,8 +618,8 @@ const App = () => {
                   </div>
                   {entryType === 'fuel' && (
                     <div className="grid grid-cols-2 gap-3">
-                      <div><label className="text-[9px] text-slate-400 block mb-1 ml-1 font-bold uppercase">ODO (km)</label><input type="number" value={inputOdo} onFocus={handleInputFocus} onChange={(e) => setInputOdo(e.target.value)} className={`${theme.input} w-full rounded-xl p-3 ${theme.textMain} outline-none font-mono text-sm focus:ring-1 focus:ring-blue-500/20`} placeholder="0" /></div>
-                      <div><label className="text-[9px] text-slate-400 block mb-1 ml-1 font-bold uppercase">리터(L)</label><input type="number" value={inputLiters} onFocus={handleInputFocus} onChange={(e) => setInputLiters(e.target.value)} className={`${theme.input} w-full rounded-xl p-3 ${theme.textMain} outline-none font-mono text-sm focus:ring-1 focus:ring-blue-500/20`} placeholder="0.0" /></div>
+                      <div><label className="text-[9px] text-slate-400 block mb-1 ml-1 font-bold uppercase">ODO (km)</label><input type="number" value={inputOdo} onFocus={handleInputFocus} onChange={(e) => setInputOdo(e.target.value)} className={`${theme.input} w-full rounded-xl p-3 ${theme.textMain} outline-none font-mono text-[16px] focus:ring-1 focus:ring-blue-500/20`} placeholder="0" /></div>
+                      <div><label className="text-[9px] text-slate-400 block mb-1 ml-1 font-bold uppercase">리터(L)</label><input type="number" value={inputLiters} onFocus={handleInputFocus} onChange={(e) => setInputLiters(e.target.value)} className={`${theme.input} w-full rounded-xl p-3 ${theme.textMain} outline-none font-mono text-[16px] focus:ring-1 focus:ring-blue-500/20`} placeholder="0.0" /></div>
                     </div>
                   )}
                   <div className={`${theme.inner} p-3 rounded-xl border border-dashed ${isDarkMode ? 'border-slate-700' : 'border-slate-100'} flex justify-between items-center px-4`}>
@@ -610,8 +675,8 @@ const App = () => {
           <div className={`${theme.card} rounded-3xl p-6 w-full max-w-sm shadow-2xl border`}>
             <div className="flex justify-between items-center mb-4"><h3 className={`${theme.textMain} font-black`}>ODO 수동 교정</h3><button onClick={() => setShowOdoModal(false)} className={theme.textSub}><X size={20} /></button></div>
             <div className="space-y-4 mb-6">
-              <div><label className="text-[10px] text-slate-400 block mb-1 font-bold uppercase">시작 ODO (km)</label><input type="number" value={tempStartOdo} onFocus={handleInputFocus} onChange={(e) => setTempStartOdo(e.target.value)} className={`${theme.input} w-full rounded-xl p-3 ${theme.textMain} font-mono outline-none border focus:ring-1 focus:ring-blue-500/20`} /></div>
-              <div><label className="text-[10px] text-slate-400 block mb-1 font-bold uppercase">현재 ODO (km)</label><input type="number" value={tempCurrentOdo} onFocus={handleInputFocus} onChange={(e) => setTempCurrentOdo(e.target.value)} className={`${theme.input} w-full rounded-xl p-3 ${theme.textMain} font-mono outline-none border focus:ring-1 focus:ring-blue-500/20`} /></div>
+              <div><label className="text-[10px] text-slate-400 block mb-1 font-bold uppercase">시작 ODO (km)</label><input type="number" value={tempStartOdo} onFocus={handleInputFocus} onChange={(e) => setTempStartOdo(e.target.value)} className={`${theme.input} w-full rounded-xl p-3 ${theme.textMain} font-mono text-[16px] outline-none border focus:ring-1 focus:ring-blue-500/20`} /></div>
+              <div><label className="text-[10px] text-slate-400 block mb-1 font-bold uppercase">현재 ODO (km)</label><input type="number" value={tempCurrentOdo} onFocus={handleInputFocus} onChange={(e) => setTempCurrentOdo(e.target.value)} className={`${theme.input} w-full rounded-xl p-3 ${theme.textMain} font-mono text-[16px] outline-none border focus:ring-1 focus:ring-blue-500/20`} /></div>
             </div>
             <button onClick={handleSaveStartOdo} className="w-full bg-red-600 py-4 rounded-xl font-black text-white shadow-lg active:scale-95">적용하기</button>
           </div>
@@ -623,9 +688,9 @@ const App = () => {
           <div className={`${theme.card} rounded-3xl p-6 w-full max-w-sm shadow-2xl border overflow-y-auto max-h-[90vh]`}>
             <div className="flex justify-between items-center mb-4"><h3 className={`${theme.textMain} font-black flex items-center gap-2 uppercase tracking-tight`}><Route size={18} className="text-indigo-500"/> 구간 기록</h3><button onClick={() => setShowRouteModal(false)} className={theme.textSub}><X size={20} /></button></div>
             <div className="space-y-4 mb-6">
-              <div className="grid grid-cols-2 gap-2"><input type="text" value={newRoute.startLoc} onChange={(e) => setNewRoute({...newRoute, startLoc: e.target.value})} placeholder="출발지" className={`${theme.input} border rounded-xl p-3 ${theme.textMain} text-xs outline-none focus:ring-1 focus:ring-blue-500/20`} /><input type="text" value={newRoute.endLoc} onChange={(e) => setNewRoute({...newRoute, endLoc: e.target.value})} placeholder="도착지" className={`${theme.input} border rounded-xl p-3 ${theme.textMain} text-xs outline-none focus:ring-1 focus:ring-blue-500/20`} /></div>
-              <div className="grid grid-cols-2 gap-2"><input type="time" value={newRoute.startTime} onChange={(e) => setNewRoute({...newRoute, startTime: e.target.value})} className={`${theme.input} border rounded-xl p-3 ${theme.textMain} text-xs outline-none`} /><input type="time" value={newRoute.endTime} onChange={(e) => setNewRoute({...newRoute, endTime: e.target.value})} className={`${theme.input} border rounded-xl p-3 ${theme.textMain} text-xs outline-none`} /></div>
-              <div className="relative"><input type="number" value={newRoute.distance} onFocus={handleInputFocus} onChange={(e) => setNewRoute({...newRoute, distance: e.target.value})} placeholder="거리 (km)" className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} font-mono outline-none focus:ring-1 focus:ring-blue-500/20`} /><span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-xs">km</span></div>
+              <div className="grid grid-cols-2 gap-2"><input type="text" value={newRoute.startLoc} onChange={(e) => setNewRoute({...newRoute, startLoc: e.target.value})} placeholder="출발지" className={`${theme.input} border rounded-xl p-3 ${theme.textMain} text-[16px] outline-none focus:ring-1 focus:ring-blue-500/20`} /><input type="text" value={newRoute.endLoc} onChange={(e) => setNewRoute({...newRoute, endLoc: e.target.value})} placeholder="도착지" className={`${theme.input} border rounded-xl p-3 ${theme.textMain} text-[16px] outline-none focus:ring-1 focus:ring-blue-500/20`} /></div>
+              <div className="grid grid-cols-2 gap-2"><input type="time" value={newRoute.startTime} onChange={(e) => setNewRoute({...newRoute, startTime: e.target.value})} className={`${theme.input} border rounded-xl p-3 ${theme.textMain} text-[16px] outline-none`} /><input type="time" value={newRoute.endTime} onChange={(e) => setNewRoute({...newRoute, endTime: e.target.value})} className={`${theme.input} border rounded-xl p-3 ${theme.textMain} text-[16px] outline-none`} /></div>
+              <div className="relative"><input type="number" value={newRoute.distance} onFocus={handleInputFocus} onChange={(e) => setNewRoute({...newRoute, distance: e.target.value})} placeholder="거리 (km)" className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} font-mono text-[16px] outline-none focus:ring-1 focus:ring-blue-500/20`} /><span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-xs">km</span></div>
             </div>
             <button onClick={handleAddRoute} className="w-full bg-indigo-600 py-4 rounded-xl font-black text-white shadow-lg active:scale-95">저장 (Sync)</button>
           </div>
@@ -639,19 +704,19 @@ const App = () => {
             <div className="space-y-4">
               {editingLog.type === 'route' ? (
                 <div className="space-y-3">
-                  <input type="text" value={editingLog.startLoc} onChange={(e) => setEditingLog({...editingLog, startLoc: e.target.value})} className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} outline-none focus:ring-1 focus:ring-blue-500/20`} />
-                  <input type="text" value={editingLog.endLoc} onChange={(e) => setEditingLog({...editingLog, endLoc: e.target.value})} className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} outline-none focus:ring-1 focus:ring-blue-500/20`} />
-                  <input type="number" value={editingLog.distance} onFocus={handleInputFocus} onChange={(e) => setEditingLog({...editingLog, distance: e.target.value})} className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} font-mono outline-none focus:ring-1 focus:ring-blue-500/20`} />
+                  <input type="text" value={editingLog.startLoc} onChange={(e) => setEditingLog({...editingLog, startLoc: e.target.value})} className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} text-[16px] outline-none focus:ring-1 focus:ring-blue-500/20`} />
+                  <input type="text" value={editingLog.endLoc} onChange={(e) => setEditingLog({...editingLog, endLoc: e.target.value})} className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} text-[16px] outline-none focus:ring-1 focus:ring-blue-500/20`} />
+                  <input type="number" value={editingLog.distance} onFocus={handleInputFocus} onChange={(e) => setEditingLog({...editingLog, distance: e.target.value})} className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} font-mono text-[16px] outline-none focus:ring-1 focus:ring-blue-500/20`} />
                 </div>
               ) : (
                 <div className="space-y-3">
-                  <input type="text" value={editingLog.title} onChange={(e) => setEditingLog({...editingLog, title: e.target.value})} className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} outline-none focus:ring-1 focus:ring-blue-500/20`} />
+                  <input type="text" value={editingLog.title} onChange={(e) => setEditingLog({...editingLog, title: e.target.value})} className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} text-[16px] outline-none focus:ring-1 focus:ring-blue-500/20`} />
                   <div className="flex gap-2">
                     {['MYR', 'THB', 'LAK'].map(curr => (
                       <button key={curr} onClick={() => setEditingLog({...editingLog, currency: curr})} className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${editingLog.currency === curr ? 'bg-slate-700 text-white shadow-sm' : 'bg-white border text-slate-400 hover:bg-slate-50'}`}>{curr}</button>
                     ))}
                   </div>
-                  <input type="number" value={editingLog.costLocal} onFocus={handleInputFocus} onChange={(e) => setEditingLog({...editingLog, costLocal: e.target.value})} className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} font-mono outline-none focus:ring-1 focus:ring-blue-500/20`} />
+                  <input type="number" value={editingLog.costLocal} onFocus={handleInputFocus} onChange={(e) => setEditingLog({...editingLog, costLocal: e.target.value})} className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} font-mono text-[16px] outline-none focus:ring-1 focus:ring-blue-500/20`} />
                 </div>
               )}
               <button onClick={handleUpdateLog} className="w-full bg-emerald-600 py-4 rounded-xl font-black text-white shadow-lg flex items-center justify-center gap-2 active:scale-95 transition-transform hover:bg-emerald-500"><Check size={18}/> 수정 완료</button>
