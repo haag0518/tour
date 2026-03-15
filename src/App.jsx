@@ -72,8 +72,11 @@ const App = () => {
   const [maxAltitude, setMaxAltitude] = useState(0);
   const maxAltitudeRef = useRef(0); // 실시간 비교를 위한 참조값
   
-  // 실시간 환율 (구글 매매기준율 기준)
-  const [rates, setRates] = useState({ MYR: 1, THB: 7.82, LAK: 4500 });
+  // 실시간 환율 (기본값 대신 이전에 저장된 로컬 스토리지를 먼저 확인)
+  const [rates, setRates] = useState(() => {
+    const savedRates = localStorage.getItem('gsa_tour_rates');
+    return savedRates ? JSON.parse(savedRates) : { MYR: 1, THB: 7.82, LAK: 4500 };
+  });
   const [rateLoading, setRateLoading] = useState(true);
 
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
@@ -101,14 +104,18 @@ const App = () => {
       const response = await fetch('https://open.er-api.com/v6/latest/MYR');
       const data = await response.json();
       if (data && data.rates) {
-        setRates({
+        const newRates = {
           MYR: 1,
           THB: parseFloat(data.rates.THB.toFixed(2)),
           LAK: parseFloat(data.rates.LAK.toFixed(0))
-        });
+        };
+        setRates(newRates);
+        // 최신 환율 정보를 핸드폰 로컬 저장소에 저장 (오프라인일 때 사용하기 위함)
+        localStorage.setItem('gsa_tour_rates', JSON.stringify(newRates));
       }
     } catch (error) {
-      console.error("Rate load failed:", error);
+      // 인터넷이 끊겨서 에러가 나더라도 앱이 멈추지 않고 마지막으로 저장된 환율을 사용합니다.
+      console.warn("오프라인 상태이거나 환율 서버에 연결할 수 없어 마지막으로 확인된 환율을 사용합니다.");
     } finally {
       setRateLoading(false);
     }
