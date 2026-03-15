@@ -2,7 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
-  signInAnonymously, 
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
   signInWithCustomToken, 
   onAuthStateChanged 
 } from 'firebase/auth';
@@ -40,8 +42,13 @@ import {
   Moon,
   Cloud,
   RefreshCw,
-  Flag
+  Flag,
+  LogOut
 } from 'lucide-react';
+
+// ✅ 관리자 이메일 설정
+// 이곳에 입력된 구글 이메일로만 앱에 로그인할 수 있습니다.
+const ALLOWED_EMAILS = ['haag0518@gmail.com'];
 
 // --- Firebase 초기화 ---
 // 로컬(VS Code)에서는 팀장님의 설정값이, 프리뷰 화면에서는 기본 설정값이 작동하도록 똑똑하게 합쳐두었습니다.
@@ -64,15 +71,16 @@ const appId = typeof __app_id !== 'undefined' ? __app_id : 'gsa-tour-sync';
 const App = () => {
   // --- 상태 관리 ---
   const [user, setUser] = useState(null);
+  const [authError, setAuthError] = useState(''); // 로그인 에러 메시지 상태
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
   
-  // GPS 고도 관련 상태 (가짜 숫자 대신 0으로 시작)
+  // GPS 고도 관련 상태
   const [currentAltitude, setCurrentAltitude] = useState(0); 
   const [maxAltitude, setMaxAltitude] = useState(0);
-  const maxAltitudeRef = useRef(0); // 실시간 비교를 위한 참조값
+  const maxAltitudeRef = useRef(0);
   
-  // 실시간 환율 (기본값 대신 이전에 저장된 로컬 스토리지를 먼저 확인)
+  // 실시간 환율
   const [rates, setRates] = useState(() => {
     const savedRates = localStorage.getItem('gsa_tour_rates');
     return savedRates ? JSON.parse(savedRates) : { MYR: 1, THB: 7.82, LAK: 4500 };
@@ -110,20 +118,42 @@ const App = () => {
           LAK: parseFloat(data.rates.LAK.toFixed(0))
         };
         setRates(newRates);
-        // 최신 환율 정보를 핸드폰 로컬 저장소에 저장 (오프라인일 때 사용하기 위함)
         localStorage.setItem('gsa_tour_rates', JSON.stringify(newRates));
       }
     } catch (error) {
-      // 인터넷이 끊겨서 에러가 나더라도 앱이 멈추지 않고 마지막으로 저장된 환율을 사용합니다.
       console.warn("오프라인 상태이거나 환율 서버에 연결할 수 없어 마지막으로 확인된 환율을 사용합니다.");
     } finally {
       setRateLoading(false);
     }
   };
 
+  // --- 구글 로그인 / 로그아웃 함수 ---
+  const handleGoogleLogin = async () => {
+    try {
+      setAuthError('');
+      const provider = new GoogleAuthProvider();
+      const result = await signInWithPopup(auth, provider);
+      
+      // 이메일 검증
+      if (!ALLOWED_EMAILS.includes(result.user.email)) {
+        await signOut(auth);
+        setAuthError(`권한이 없습니다: ${result.user.email}`);
+      }
+    } catch (error) {
+      console.error("Login Error:", error);
+      setAuthError('로그인 창을 열 수 없거나 취소되었습니다.');
+    }
+  };
+
+  const handleLogout = async () => {
+    if (window.confirm("앱에서 로그아웃 하시겠습니까?")) {
+      await signOut(auth);
+      setUser(null);
+    }
+  };
+
   // --- 2. 인증 및 초기화 ---
   useEffect(() => {
-    // iOS 사파리 입력창 포커스 시 자동 확대 방지 설정
     let meta = document.querySelector('meta[name="viewport"]');
     if (!meta) {
       meta = document.createElement('meta');
@@ -132,26 +162,44 @@ const App = () => {
     }
     meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0';
 
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+    const initPreviewAuth = async () => {
+      // 캔버스 미리보기 환경을 위한 권한 처리
+      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+        try {
           await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
+        } catch (error) {
+          console.error("Preview Auth Error:", error);
         }
-      } catch (error) {
-        console.error("Auth Error:", error);
       }
     };
-    initAuth();
+    initPreviewAuth();
     fetchRealTimeRates();
-    const unsubscribe = onAuthStateChanged(auth, setUser);
+
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      if (currentUser) {
+        // 실제 웹/앱 환경일 때 이메일 체크 (캔버스 미리보기 토큰이 없을 때만)
+        if (typeof __initial_auth_token === 'undefined' || !__initial_auth_token) {
+           if (currentUser.email && !ALLOWED_EMAILS.includes(currentUser.email)) {
+              signOut(auth);
+              setUser(null);
+              setAuthError(`권한이 없습니다: ${currentUser.email}`);
+              setLoading(false);
+              return;
+           }
+        }
+        setUser(currentUser);
+      } else {
+        setUser(null);
+        setLoading(false); // 유저가 없으면 로그인 화면을 띄우기 위해 로딩 종료
+      }
+    });
     return () => unsubscribe();
   }, []);
 
   // --- 3. Firestore 데이터 동기화 ---
   useEffect(() => {
     if (!user) return;
+    setLoading(true);
 
     const configDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'config', 'state');
     const unsubscribeConfig = onSnapshot(configDocRef, (docSnap) => {
@@ -161,7 +209,6 @@ const App = () => {
         setCurrentOdo(data.currentOdo || 0);
         setSessionStart(data.sessionStart || 0);
         
-        // 클라우드에 저장된 최고 고도 동기화
         if (data.maxAltitude !== undefined) {
           setMaxAltitude(data.maxAltitude);
           maxAltitudeRef.current = data.maxAltitude;
@@ -176,7 +223,6 @@ const App = () => {
       querySnapshot.forEach((doc) => {
         logsArray.push({ id: doc.id, ...doc.data() });
       });
-      // 전체 로그 시간 역순 정렬
       setLogs(logsArray.sort((a, b) => b.timestamp - a.timestamp));
     }, (err) => console.error("Logs fetch error:", err));
 
@@ -188,28 +234,22 @@ const App = () => {
 
   // --- 4. GPS 실시간 고도 추적 ---
   useEffect(() => {
-    // 브라우저가 GPS를 지원하지 않으면 종료
-    if (!navigator.geolocation) return;
+    if (!navigator.geolocation || !user) return;
 
     const watchId = navigator.geolocation.watchPosition(
       (position) => {
         const alt = position.coords.altitude;
-        // GPS가 고도값을 제공할 경우에만 작동
         if (alt !== null) {
           const currentAltValue = Math.round(alt);
-          setCurrentAltitude(currentAltValue); // 현재 고도 업데이트
+          setCurrentAltitude(currentAltValue);
           
-          // 현재 고도가 예전 최고 고도보다 높다면? 신기록 달성!
           if (currentAltValue > maxAltitudeRef.current) {
             setMaxAltitude(currentAltValue);
             maxAltitudeRef.current = currentAltValue;
             
-            // 파이어베이스에 새로운 최고 고도 저장
-            if (user) {
-              const configDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'config', 'state');
-              setDoc(configDocRef, { maxAltitude: currentAltValue }, { merge: true })
-                .catch(e => console.error("고도 저장 에러", e));
-            }
+            const configDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'config', 'state');
+            setDoc(configDocRef, { maxAltitude: currentAltValue }, { merge: true })
+              .catch(e => console.error("고도 저장 에러", e));
           }
         }
       },
@@ -223,7 +263,6 @@ const App = () => {
       }
     );
 
-    // 컴포넌트 종료 시 GPS 추적 중지
     return () => navigator.geolocation.clearWatch(watchId);
   }, [user]);
 
@@ -242,7 +281,7 @@ const App = () => {
     const [sh, sm] = start.split(':').map(Number);
     const [eh, em] = end.split(':').map(Number);
     let diffMins = (eh * 60 + em) - (sh * 60 + sm);
-    if (diffMins < 0) diffMins += 24 * 60; // 자정 넘김 대응
+    if (diffMins < 0) diffMins += 24 * 60; 
     const h = Math.floor(diffMins / 60);
     const m = diffMins % 60;
     if (h === 0) return `${m}분`;
@@ -299,7 +338,6 @@ const App = () => {
       await deleteDoc(logDocRef);
     }
     await saveConfigToCloud(0, 0, 0);
-    // 초기화 시 최고 고도도 삭제
     const configDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'config', 'state');
     await updateDoc(configDocRef, { maxAltitude: 0 }).catch(() => {});
     setMaxAltitude(0);
@@ -333,17 +371,14 @@ const App = () => {
     setShowOdoModal(false);
   };
 
-  // --- 실시간 수치 연산 ---
   const todayStr = new Date().toISOString().split('T')[0];
   const totalDrivenDistance = parseFloat(Math.max(0, currentOdo - startOdo).toFixed(2));
   const currentSessionLogs = logs.filter(log => log.timestamp >= sessionStart);
   
-  // 오늘의 경로: 먼저 시작한 일정이 위로 가도록 정렬
   const todaysRoutes = currentSessionLogs
     .filter(l => l.type === 'route')
     .sort((a, b) => a.timestamp - b.timestamp);
 
-  // 금일 총 소요시간 (첫 출발 ~ 마지막 도착)
   const firstRoute = todaysRoutes.length > 0 ? todaysRoutes[0] : null;
   const lastRoute = todaysRoutes.length > 0 ? todaysRoutes[todaysRoutes.length - 1] : null;
   const totalDayDuration = (firstRoute && lastRoute) ? calculateDuration(firstRoute.startTime, lastRoute.endTime) : '';
@@ -371,19 +406,61 @@ const App = () => {
   const handleInputFocus = (e) => e.target.select();
   const openConfirm = (msg, action) => setConfirmState({ show: true, message: msg, onConfirm: action });
 
-  // --- 테마 스타일 설정 ---
   const theme = {
-    bg: isDarkMode ? 'bg-slate-950' : 'bg-white',
+    bg: isDarkMode ? 'bg-slate-950' : 'bg-slate-50',
     header: isDarkMode ? 'bg-slate-900 border-slate-800 shadow-lg' : 'bg-white border-slate-100 shadow-sm',
-    card: isDarkMode ? 'bg-slate-800/50 border-slate-700/50' : 'bg-slate-50 border-slate-200 shadow-sm hover:shadow-md transition-shadow',
-    inner: isDarkMode ? 'bg-slate-900' : 'bg-white',
+    card: isDarkMode ? 'bg-slate-800/50 border-slate-700/50' : 'bg-white border-slate-200 shadow-sm hover:shadow-md transition-shadow',
+    inner: isDarkMode ? 'bg-slate-900' : 'bg-slate-50',
     textMain: isDarkMode ? 'text-white' : 'text-slate-900',
     textSub: isDarkMode ? 'text-slate-400' : 'text-slate-500',
     input: isDarkMode ? 'bg-slate-900 border-slate-700' : 'bg-white border-slate-300',
     nav: isDarkMode ? 'bg-slate-900/90 border-slate-800' : 'bg-white/95 border-slate-200',
   };
 
-  // --- UI 컴포넌트 ---
+  // --- UI 컴포넌트들 ---
+  if (loading) {
+    return (
+      <div className={`min-h-screen ${theme.bg} flex items-center justify-center`}>
+        <div className="text-center">
+          <Cloud size={48} className="text-blue-500 animate-bounce mx-auto mb-4" />
+          <p className={`${theme.textMain} font-black`}>데이터 확인 중...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // 로그인 화면 (유저 정보가 없을 때만 보임)
+  if (!user) {
+    return (
+      <div className={`min-h-screen ${theme.bg} flex items-center justify-center p-4 transition-colors duration-700`}>
+        <div className={`${theme.card} p-8 rounded-3xl border shadow-2xl max-w-sm w-full text-center animate-in fade-in zoom-in duration-500`}>
+          <div className="bg-blue-100 text-blue-600 p-4 rounded-full inline-block mb-4 shadow-inner">
+            <Navigation size={36} className="fill-blue-600" />
+          </div>
+          <h1 className={`${theme.textMain} text-2xl font-black mb-2 tracking-tight`}>GSA 투어 노트</h1>
+          <p className={`${theme.textSub} text-xs mb-8 font-bold`}>승인된 관리자 계정으로 로그인해주세요.</p>
+
+          <button
+            onClick={handleGoogleLogin}
+            className="w-full bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 font-black py-4 rounded-xl shadow-sm transition-transform active:scale-95 flex items-center justify-center gap-3"
+          >
+            <svg className="w-5 h-5" viewBox="0 0 24 24">
+              <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+            </svg>
+            Google 계정으로 시작
+          </button>
+
+          {authError && (
+            <p className="mt-5 text-[11px] font-bold text-red-500 bg-red-50 p-3 rounded-xl border border-red-100">{authError}</p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   const Header = () => (
     <div className={`${theme.header} px-3 py-2 flex justify-between items-center border-b sticky top-0 z-40 transition-colors duration-500`}>
       <div className="flex items-baseline gap-1">
@@ -392,8 +469,8 @@ const App = () => {
         {!loading && <Cloud size={10} className="text-emerald-500 ml-1 animate-pulse" title="클라우드 동기화 완료" />}
       </div>
       
-      <div className="text-right flex items-center gap-2">
-        <div className="flex flex-col items-end">
+      <div className="text-right flex items-center gap-1.5">
+        <div className="flex flex-col items-end mr-1">
           <div className="flex items-center gap-1">
             <p className="text-[8px] text-slate-400 font-bold uppercase tracking-tighter leading-none mb-0.5">Rate (1 MYR)</p>
             {rateLoading && <RefreshCw size={7} className="animate-spin text-slate-300" />}
@@ -402,8 +479,11 @@ const App = () => {
             {rates.THB} THB | {rates.LAK} LAK
           </p>
         </div>
-        <button onClick={() => setIsDarkMode(!isDarkMode)} className={`ml-1 p-1.5 rounded-full ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'} transition-all active:scale-90`}>
-           {isDarkMode ? <Moon size={12} className="text-blue-400" /> : <Sun size={12} className="text-orange-400" />}
+        <button onClick={() => setIsDarkMode(!isDarkMode)} className={`p-2 rounded-full ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'} transition-all active:scale-90`}>
+           {isDarkMode ? <Moon size={14} className="text-blue-400" /> : <Sun size={14} className="text-orange-400" />}
+        </button>
+        <button onClick={handleLogout} className={`p-2 rounded-full ${isDarkMode ? 'bg-slate-800' : 'bg-red-50'} transition-all active:scale-90`} title="로그아웃">
+           <LogOut size={14} className="text-red-500" />
         </button>
       </div>
     </div>
@@ -463,7 +543,6 @@ const App = () => {
           </div>
         </div>
 
-        {/* 금일 총 소요시간 표시 */}
         {todaysRoutes.length > 0 && (
           <div className="mb-4 flex items-center gap-2 bg-blue-50/50 p-2 rounded-xl border border-blue-100 animate-in fade-in duration-500">
              <Clock size={12} className="text-blue-500" />
@@ -517,7 +596,6 @@ const App = () => {
       </div>
     );
 
-    // 가로 모드 (아이패드 등): 왼쪽 [계산기 + 경로] / 오른쪽 [6개 카드]
     if (!isMobile && orientation === 'landscape') {
       return (
         <div className="p-4 grid grid-cols-2 gap-4 items-start pb-28">
@@ -530,7 +608,6 @@ const App = () => {
       );
     }
 
-    // 세로 모드: 계산기 -> 카드 -> 오늘의 경로 순
     return (
       <div className="p-4 flex flex-col gap-4 pb-28">
         {calculatorSection}
@@ -575,17 +652,6 @@ const App = () => {
       )}
     </div>
   );
-
-  if (loading) {
-    return (
-      <div className={`min-h-screen ${theme.bg} flex items-center justify-center`}>
-        <div className="text-center">
-          <Cloud size={48} className="text-blue-500 animate-bounce mx-auto mb-4" />
-          <p className={`${theme.textMain} font-black`}>데이터 동기화 중...</p>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className={`min-h-screen ${theme.bg} transition-colors duration-700 relative overflow-x-hidden app-container`}>
@@ -663,7 +729,6 @@ const App = () => {
         <button onClick={() => setActiveTab('logs')} className={`flex flex-col items-center gap-1 ${activeTab === 'logs' ? 'text-blue-600' : 'text-slate-400'} active:scale-110 transition-transform`}><Navigation size={24} /><span className="text-[10px] font-bold uppercase tracking-tighter">일지</span></button>
       </nav>
 
-      {/* --- 모달 등 --- */}
       {confirmState.show && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[100] flex items-center justify-center p-6 animate-in fade-in duration-200">
           <div className={`${theme.card} rounded-3xl p-6 w-full max-w-sm shadow-2xl border`}>
