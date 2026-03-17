@@ -47,11 +47,9 @@ import {
 } from 'lucide-react';
 
 // ✅ 관리자 이메일 설정
-// 이곳에 입력된 구글 이메일로만 앱에 로그인할 수 있습니다.
 const ALLOWED_EMAILS = ['haag0518@gmail.com'];
 
 // --- Firebase 초기화 ---
-// 로컬(VS Code)에서는 팀장님의 설정값이, 프리뷰 화면에서는 기본 설정값이 작동하도록 똑똑하게 합쳐두었습니다.
 const firebaseConfig = typeof __firebase_config !== 'undefined' 
   ? JSON.parse(__firebase_config) 
   : {
@@ -71,16 +69,14 @@ const appId = typeof __app_id !== 'undefined' ? __app_id : 'gsa-tour-sync';
 const App = () => {
   // --- 상태 관리 ---
   const [user, setUser] = useState(null);
-  const [authError, setAuthError] = useState(''); // 로그인 에러 메시지 상태
+  const [authError, setAuthError] = useState(''); 
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
   
-  // GPS 고도 관련 상태
   const [currentAltitude, setCurrentAltitude] = useState(0); 
   const [maxAltitude, setMaxAltitude] = useState(0);
   const maxAltitudeRef = useRef(0);
   
-  // 실시간 환율
   const [rates, setRates] = useState(() => {
     const savedRates = localStorage.getItem('gsa_tour_rates');
     return savedRates ? JSON.parse(savedRates) : { MYR: 1, THB: 7.82, LAK: 4500 };
@@ -90,7 +86,6 @@ const App = () => {
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const [orientation, setOrientation] = useState(window.innerHeight > window.innerWidth ? 'portrait' : 'landscape');
   
-  // 클라우드 데이터 상태
   const [logs, setLogs] = useState([]);
   const [startOdo, setStartOdo] = useState(0); 
   const [currentOdo, setCurrentOdo] = useState(0); 
@@ -134,7 +129,6 @@ const App = () => {
       const provider = new GoogleAuthProvider();
       const result = await signInWithPopup(auth, provider);
       
-      // 이메일 검증
       if (!ALLOWED_EMAILS.includes(result.user.email)) {
         await signOut(auth);
         setAuthError(`권한이 없습니다: ${result.user.email}`);
@@ -163,7 +157,6 @@ const App = () => {
     meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0';
 
     const initPreviewAuth = async () => {
-      // 캔버스 미리보기 환경을 위한 권한 처리
       if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
         try {
           await signInWithCustomToken(auth, __initial_auth_token);
@@ -177,7 +170,6 @@ const App = () => {
 
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       if (currentUser) {
-        // 실제 웹/앱 환경일 때 이메일 체크 (캔버스 미리보기 토큰이 없을 때만)
         if (typeof __initial_auth_token === 'undefined' || !__initial_auth_token) {
            if (currentUser.email && !ALLOWED_EMAILS.includes(currentUser.email)) {
               signOut(auth);
@@ -190,7 +182,7 @@ const App = () => {
         setUser(currentUser);
       } else {
         setUser(null);
-        setLoading(false); // 유저가 없으면 로그인 화면을 띄우기 위해 로딩 종료
+        setLoading(false); 
       }
     });
     return () => unsubscribe();
@@ -275,7 +267,6 @@ const App = () => {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // --- 시간 계산 도우미 함수 ---
   const calculateDuration = (start, end) => {
     if (!start || !end) return '';
     const [sh, sm] = start.split(':').map(Number);
@@ -288,7 +279,6 @@ const App = () => {
     return `${h}시간 ${m > 0 ? m + '분' : ''}`;
   };
 
-  // --- 데이터 조작 함수 ---
   const saveConfigToCloud = async (sOdo, cOdo, sTime) => {
     if (!user) return;
     const configDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'config', 'state');
@@ -417,7 +407,6 @@ const App = () => {
     nav: isDarkMode ? 'bg-slate-900/90 border-slate-800' : 'bg-white/95 border-slate-200',
   };
 
-  // --- UI 컴포넌트들 ---
   if (loading) {
     return (
       <div className={`min-h-screen ${theme.bg} flex items-center justify-center`}>
@@ -429,7 +418,6 @@ const App = () => {
     );
   }
 
-  // 로그인 화면 (유저 정보가 없을 때만 보임)
   if (!user) {
     return (
       <div className={`min-h-screen ${theme.bg} flex items-center justify-center p-4 transition-colors duration-700`}>
@@ -778,6 +766,13 @@ const App = () => {
                 <div className="space-y-3">
                   <input type="text" value={editingLog.startLoc} onChange={(e) => setEditingLog({...editingLog, startLoc: e.target.value})} className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} text-[16px] outline-none focus:ring-1 focus:ring-blue-500/20`} />
                   <input type="text" value={editingLog.endLoc} onChange={(e) => setEditingLog({...editingLog, endLoc: e.target.value})} className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} text-[16px] outline-none focus:ring-1 focus:ring-blue-500/20`} />
+                  
+                  {/* 시간 수정 칸 추가됨 */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <input type="time" value={editingLog.startTime || ''} onChange={(e) => setEditingLog({...editingLog, startTime: e.target.value})} className={`${theme.input} border rounded-xl p-3 ${theme.textMain} text-[16px] outline-none`} />
+                    <input type="time" value={editingLog.endTime || ''} onChange={(e) => setEditingLog({...editingLog, endTime: e.target.value})} className={`${theme.input} border rounded-xl p-3 ${theme.textMain} text-[16px] outline-none`} />
+                  </div>
+
                   <input type="number" value={editingLog.distance} onFocus={handleInputFocus} onChange={(e) => setEditingLog({...editingLog, distance: e.target.value})} className={`${theme.input} border w-full rounded-xl p-3 ${theme.textMain} font-mono text-[16px] outline-none focus:ring-1 focus:ring-blue-500/20`} />
                 </div>
               ) : (
